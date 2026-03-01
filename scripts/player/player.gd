@@ -1,23 +1,41 @@
 extends CharacterBody2D
-## Player controller — handles movement and camera.
+## Player controller — handles movement, block placement, and mining.
 ##
 ## KEY GODOT CONCEPTS:
-## - CharacterBody2D: A physics body designed for player-controlled characters.
-##   It has built-in collision detection and a `velocity` property.
-## - _physics_process(): Called every physics frame (default 60fps). Use this
-##   for movement so speed is consistent regardless of rendering framerate.
-## - @export: Makes a variable editable in the Godot Inspector panel, so you
-##   can tweak values without changing code.
-## - @onready: Initializes the variable after the node enters the scene tree.
-##   It's shorthand for assigning in _ready(). Use it to grab child node refs.
+## - _physics_process(delta): Called every physics frame. `delta` is the time
+##   in seconds since the last frame (~0.0167 at 60fps). Multiply by delta
+##   for frame-rate-independent timers and movement.
+## - _unhandled_input(event): Called for input events that weren't consumed by
+##   the GUI. Perfect for gameplay input — if the player clicks a UI button,
+##   this method won't fire, so we won't accidentally place a block.
+## - get_global_mouse_position(): Returns the mouse position in world space,
+##   accounting for Camera2D zoom and offset. Essential for clicking on tiles.
 
-## Movement speed in pixels per second. Exported so you can tweak in the editor.
+## Movement speed in pixels per second.
 @export var speed: float = 200.0
+## Maximum distance (pixels) the player can interact with tiles.
+@export var interaction_range: float = 128.0
 
-## References to child nodes. The $ syntax is shorthand for get_node().
-## $Sprite2D is the same as get_node("Sprite2D").
 @onready var sprite: Sprite2D = $Sprite2D
 @onready var camera: Camera2D = $Camera2D
+
+## Reference to the World node — set by main.gd during _ready().
+## We use this to query tiles, place blocks, and update the cursor.
+var world: Node2D
+
+# --- Mining state ---
+var mining_target: Vector2i = Vector2i(-1, -1)
+var mining_progress: float = 0.0
+var mining_duration: float = 0.5
+
+## How long (seconds) it takes to mine each block type.
+## Harder materials take longer.
+var mining_times := {
+	1: 0.4,   # Dirt   — soft, fast to mine
+	2: 0.8,   # Stone  — hard, slow to mine
+	4: 0.3,   # Wood   — easy to break
+	5: 0.3,   # Sand   — easy to break
+}
 
 
 func _ready() -> void:
@@ -25,26 +43,20 @@ func _ready() -> void:
 
 
 func _create_player_sprite() -> void:
-	## Build a simple 32x32 colored square as the player's visual.
-	## We use Godot's Image class to create pixel data, then convert
-	## it to an ImageTexture that Sprite2D can display.
 	var size := 32
 	var img := Image.create(size, size, false, Image.FORMAT_RGBA8)
 
-	# Bright coral/red so the player stands out against the terrain
 	var body_color := Color(0.85, 0.25, 0.25)
 	var outline_color := Color(0.55, 0.12, 0.12)
 
 	for x in range(size):
 		for y in range(size):
-			# 2px outline on all edges for visibility
 			if x < 2 or x >= size - 2 or y < 2 or y >= size - 2:
 				img.set_pixel(x, y, outline_color)
 			else:
 				img.set_pixel(x, y, body_color)
 
-	# Add a small "eye" detail so you can tell which way is "up"
-	# (two white dots near the top)
+	# Two white "eyes" near the top
 	for dx in [10, 20]:
 		for dy in [8, 9]:
 			img.set_pixel(dx, dy, Color.WHITE)
@@ -52,23 +64,131 @@ func _create_player_sprite() -> void:
 	sprite.texture = ImageTexture.create_from_image(img)
 
 
-func _physics_process(_delta: float) -> void:
-	## Input.get_axis() returns a value from -1.0 to 1.0 based on the two
-	## opposing actions. If "move_left" is pressed it returns -1, if
-	## "move_right" is pressed it returns 1, if neither or both: 0.
+func _physics_process(delta: float) -> void:
+	_handle_movement()
+	_update_cursor()
+	_handle_mining(delta)
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	## Handle discrete click events (one action per press).
+	## We use _unhandled_input so clicks on UI elements (hotbar panels)
+	## are consumed first and don't trigger block placement.
+	if not world:
+		return
+	if event is InputEventMouseButton and event.pressed:
+		if event.button_index == MOUSE_BUTTON_LEFT:
+			_try_place_block()
+
+
+# --- Movement ---
+
+func _handle_movement() -> void:
 	var direction := Vector2.ZERO
 	direction.x = Input.get_axis("move_left", "move_right")
 	direction.y = Input.get_axis("move_up", "move_down")
 
-	# Normalize so diagonal movement isn't ~41% faster than cardinal.
-	# Without this, pressing W+D gives Vector2(1,−1) with length 1.414.
 	if direction.length() > 0.0:
 		direction = direction.normalized()
 
-	# `velocity` is a built-in CharacterBody2D property (Vector2).
 	velocity = direction * speed
-
-	# move_and_slide() moves the body by `velocity`, automatically handling
-	# collisions by "sliding" along surfaces. It also adjusts velocity based
-	# on collisions so the character doesn't clip through walls.
 	move_and_slide()
+
+
+# --- Cursor ---
+
+func _update_cursor() -> void:
+	if not world:
+		return
+	var grid_pos := _get_hovered_grid_pos()
+	var in_range := _is_in_range(grid_pos)
+	world.show_cursor(grid_pos, in_range)
+
+
+# --- Block Placement ---
+
+func _try_place_block() -> void:
+	var grid_pos := _get_hovered_grid_pos()
+	if not _is_in_range(grid_pos):
+		return
+
+	# Don't place a block on the tile the player is standing on
+	var player_grid := world.world_to_grid(global_position)
+	if grid_pos == player_grid:
+		return
+
+	var tile_type := world.get_tile_type(grid_pos)
+	# Can only place on grass tiles (empty ground)
+	if tile_type != 0:
+		return
+
+	var block_type := InventoryManager.get_selected_block_type()
+	if block_type < 0:
+		return  # Empty hotbar slot selected
+
+	world.set_tile(grid_pos, block_type)
+
+
+# --- Mining ---
+
+func _handle_mining(delta: float) -> void:
+	## Mining is continuous: hold right-click to mine the tile under the cursor.
+	## Progress resets if you move the mouse to a different tile or release.
+	if not world:
+		return
+
+	var grid_pos := _get_hovered_grid_pos()
+	var in_range := _is_in_range(grid_pos)
+
+	if Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) and in_range:
+		var tile_type := world.get_tile_type(grid_pos)
+		if _is_mineable(tile_type):
+			# If we started mining a new tile, reset progress
+			if grid_pos != mining_target:
+				mining_target = grid_pos
+				mining_progress = 0.0
+				mining_duration = mining_times.get(tile_type, 0.5)
+
+			mining_progress += delta
+			var progress_pct := mining_progress / mining_duration
+			world.show_mining_progress(grid_pos, progress_pct)
+
+			# Mining complete — destroy the block
+			if mining_progress >= mining_duration:
+				world.clear_tile(grid_pos)
+				_reset_mining()
+			return
+
+	# If we reach here, stop mining (released button, out of range, or bad tile)
+	_reset_mining()
+
+
+func _is_mineable(tile_type: int) -> bool:
+	## Grass (0) and water (3) can't be mined. Everything else can.
+	return tile_type > 0 and tile_type != 3
+
+
+func _reset_mining() -> void:
+	if mining_target != Vector2i(-1, -1):
+		if world:
+			world.hide_mining_progress()
+		mining_target = Vector2i(-1, -1)
+		mining_progress = 0.0
+
+
+# --- Helpers ---
+
+func _get_hovered_grid_pos() -> Vector2i:
+	## Get the grid coordinates of the tile under the mouse cursor.
+	## get_global_mouse_position() accounts for camera zoom/offset.
+	var mouse_pos := get_global_mouse_position()
+	return world.world_to_grid(mouse_pos)
+
+
+func _is_in_range(grid_pos: Vector2i) -> bool:
+	## Check if a tile is within the player's interaction range.
+	var tile_center := Vector2(
+		grid_pos.x * 32 + 16,
+		grid_pos.y * 32 + 16
+	)
+	return global_position.distance_to(tile_center) <= interaction_range
