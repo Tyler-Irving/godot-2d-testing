@@ -25,6 +25,7 @@ var ingredient_labels: Array[Label] = []
 func _ready() -> void:
 	crafting_system = CraftingSystemScript.new()
 	visible = false
+	set_anchors_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_build_ui()
 	InventoryManager.inventory_changed.connect(_on_inventory_changed)
