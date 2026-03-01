@@ -113,11 +113,11 @@ func _try_place_block() -> void:
 		return
 
 	# Don't place a block on the tile the player is standing on
-	var player_grid := world.world_to_grid(global_position)
+	var player_grid = world.world_to_grid(global_position)
 	if grid_pos == player_grid:
 		return
 
-	var tile_type := world.get_tile_type(grid_pos)
+	var tile_type = world.get_tile_type(grid_pos)
 	# Can only place on grass tiles (empty ground)
 	if tile_type != 0:
 		return
@@ -141,7 +141,7 @@ func _handle_mining(delta: float) -> void:
 	var in_range := _is_in_range(grid_pos)
 
 	if Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) and in_range:
-		var tile_type := world.get_tile_type(grid_pos)
+		var tile_type = world.get_tile_type(grid_pos)
 		if _is_mineable(tile_type):
 			# If we started mining a new tile, reset progress
 			if grid_pos != mining_target:
